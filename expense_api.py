@@ -1,7 +1,7 @@
 """
-expense_api.py  ─  SplitMate Expense Prediction API
+expense_api.py  -  SplitMate Expense Prediction API
 ====================================================
-FastAPI service untuk prediksi pengeluaran bulanan menggunakan model LSTM
+FastAPI service untuk prediksi pengeluaran menggunakan model LSTM
 yang sudah di-train dan di-export ke model_exports/.
 
 Struktur direktori yang dibutuhkan:
@@ -9,32 +9,43 @@ Struktur direktori yang dibutuhkan:
     expense_predictor.keras
     scalers.pkl
     model_config.json
+  logs/                          <-- TensorBoard training logs
+    20260511-075444/
+      train/
+      validation/
+    gradient_tape_20260511-075701/
+      train/
+      validation/
 
 Jalankan:
   uvicorn expense_api:app --host 0.0.0.0 --port 8000 --reload
+
+Untuk TensorBoard:
+  tensorboard --logdir logs/
 """
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import numpy as np
-import pandas as pd
 import pickle
 import json
 import os
+import glob
 import tensorflow as tf
 from tensorflow import keras
+import tensorboard_utils
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# App
 
 app = FastAPI(
     title="SplitMate Expense Prediction API",
-    description="REST API untuk prediksi pengeluaran bulanan menggunakan LSTM",
-    version="1.0.0"
+    description="REST API untuk prediksi pengeluaran menggunakan LSTM",
+    version="1.1.0"
 )
 
 
-# ── Custom classes (dibutuhkan untuk load model) ──────────────────────────────
+# Custom classes (dibutuhkan untuk load model)
 
 class AttentionLayer(keras.layers.Layer):
     """Self-attention Bahdanau-style pada output LSTM."""
@@ -87,9 +98,10 @@ class WeightedHuberLoss(keras.losses.Loss):
         return cfg
 
 
-# ── Load artefak model ────────────────────────────────────────────────────────
+# Load artefak model
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "model_exports")
+LOGS_DIR  = os.environ.get("LOGS_DIR",  "logs")
 
 model_loaded = keras.models.load_model(
     os.path.join(MODEL_DIR, "expense_predictor.keras"),
@@ -106,146 +118,214 @@ with open(os.path.join(MODEL_DIR, "model_config.json")) as f:
 
 WINDOW       = model_config["window_size"]
 FEATURE_COLS = model_config["feature_cols"]
+N_FEATURES   = model_config["n_features"]
 
 
-# ── Pydantic schemas ──────────────────────────────────────────────────────────
+# Pydantic schemas
 
-class TransactionItem(BaseModel):
-    year_month      : str          # format: "YYYY-MM"
-    amount          : float
-    category        : str
-    transaction_type: str = "expense"
+class FeatureRow(BaseModel):
+    amount: float
+    month: float
+    is_weekend: int
+    year: float
+    transaction_type_income: int
+    category_freelance: int = 0
+    category_gaji: int = 0
+    category_hiburan: int = 0
+    category_investasi: int = 0
+    category_kesehatan: int = 0
+    category_lainnya: int = 0
+    category_makanan: int = 0
+    category_pendidikan: int = 0
+    category_tabungan: int = 0
+    category_tagihan: int = 0
+    category_tempat_tinggal: int = 0
+    category_transportasi: int = 0
+    payment_mode_ewallet: int = 0
+    payment_mode_kartu: int = 0
+    payment_mode_qris: int = 0
+    payment_mode_tunai: int = 0
+    location_bandung: int = 0
+    location_denpasar: int = 0
+    location_jakarta: int = 0
+    location_makassar: int = 0
+    location_medan: int = 0
+    location_palembang: int = 0
+    location_semarang: int = 0
+    location_surabaya: int = 0
+    location_unknown: int = 0
+    location_yogyakarta: int = 0
+    day_of_week_Monday: int = 0
+    day_of_week_Saturday: int = 0
+    day_of_week_Sunday: int = 0
+    day_of_week_Thursday: int = 0
+    day_of_week_Tuesday: int = 0
+    day_of_week_Wednesday: int = 0
 
 
 class PredictRequest(BaseModel):
-    transactions  : List[TransactionItem]
-    n_months_ahead: Optional[int] = 1
+    rows: List[FeatureRow]
+    n_steps_ahead: Optional[int] = 1
 
 
 class PredictionResult(BaseModel):
-    bulan_ke    : int
-    prediksi_rp : float
+    step: int
+    prediksi_norm: float
+    prediksi_idr: float
     prediksi_fmt: str
 
 
 class PredictResponse(BaseModel):
-    status        : str
-    window_months : int
-    predictions   : List[PredictionResult]
+    status: str
+    window_size: int
+    predictions: List[PredictionResult]
     mae_normalized: float
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
-
-def build_features(df_expense: pd.DataFrame) -> pd.DataFrame:
-    """Membangun feature matrix dari data transaksi expense."""
-    monthly = (
-        df_expense.groupby("year_month")["amount"]
-        .sum().reset_index()
-        .rename(columns={"amount": "total_expense"})
-        .sort_values("year_month").reset_index(drop=True)
-    )
-    monthly_cat = (
-        df_expense.groupby(["year_month", "category"])["amount"]
-        .sum().unstack(fill_value=0).reset_index()
-        .sort_values("year_month").reset_index(drop=True)
-    )
-    feat = monthly.merge(monthly_cat, on="year_month", how="left")
-    feat["month_num"] = feat["year_month"].apply(lambda x: int(x.split("-")[1]))
-    feat["year_num"]  = feat["year_month"].apply(lambda x: int(x.split("-")[0]))
-    feat["month_sin"] = np.sin(2 * np.pi * feat["month_num"] / 12)
-    feat["month_cos"] = np.cos(2 * np.pi * feat["month_num"] / 12)
-    feat["lag_1"]     = feat["total_expense"].shift(1)
-    feat["lag_2"]     = feat["total_expense"].shift(2)
-    feat["lag_3"]     = feat["total_expense"].shift(3)
-    feat["rolling_3"] = feat["total_expense"].rolling(3).mean().shift(1)
-    feat["rolling_6"] = feat["total_expense"].rolling(6).mean().shift(1)
-    feat.dropna(inplace=True)
-    feat.reset_index(drop=True, inplace=True)
-    # pastikan semua kolom ada (isi 0 jika kategori tidak ada di data ini)
-    for col in FEATURE_COLS:
-        if col not in feat.columns:
-            feat[col] = 0.0
-    return feat
-
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# Endpoints
 
 @app.get("/")
 def root():
     return {
         "service"  : "SplitMate Expense Prediction API",
-        "version"  : "1.0.0",
-        "endpoints": ["/predict", "/health", "/model-info", "/docs"]
+        "version"  : "1.1.0",
+        "endpoints": ["/predict", "/health", "/model-info", "/training-logs", "/training-metrics", "/training-metrics/{run_name}", "/docs"]
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": model_loaded is not None}
+    logs_present = os.path.isdir(LOGS_DIR) and bool(os.listdir(LOGS_DIR))
+    return {
+        "status"       : "ok",
+        "model_loaded" : model_loaded is not None,
+        "logs_present" : logs_present,
+        "logs_dir"     : LOGS_DIR,
+    }
 
 
 @app.get("/model-info")
 def model_info():
     return {
-        "model_type"  : model_config["model_type"],
-        "window_size" : model_config["window_size"],
-        "n_features"  : model_config["n_features"],
-        "test_mae_norm": model_config["test_mae_norm"],
-        "test_mae_rp" : model_config["test_mae_rp"],
-        "test_mape_pct": model_config["test_mape_pct"],
-        "test_r2"     : model_config["test_r2"],
+        "model_type"    : model_config["model_type"],
+        "window_size"   : model_config["window_size"],
+        "n_features"    : model_config["n_features"],
+        "test_mae_norm" : model_config["test_mae_norm"],
+        "test_accuracy" : model_config["test_accuracy"],
+        "accuracy_def"  : model_config["accuracy_def"],
     }
+
+
+@app.get("/training-logs")
+def training_logs():
+    """
+    Daftar TensorBoard log runs yang tersedia di folder logs/.
+    Untuk membuka TensorBoard: tensorboard --logdir logs/
+    """
+    if not os.path.isdir(LOGS_DIR):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Folder logs tidak ditemukan: {LOGS_DIR}."
+        )
+
+    runs = []
+    for entry in sorted(os.listdir(LOGS_DIR)):
+        run_path = os.path.join(LOGS_DIR, entry)
+        if not os.path.isdir(run_path):
+            continue
+        splits      = sorted(os.listdir(run_path))
+        event_files = sorted(glob.glob(os.path.join(run_path, "**", "events.out.tfevents.*"), recursive=True))
+        runs.append({
+            "run_name"   : entry,
+            "splits"     : splits,
+            "event_files": [os.path.relpath(f, LOGS_DIR) for f in event_files],
+        })
+
+    return {
+        "logs_dir"           : os.path.abspath(LOGS_DIR),
+        "runs"               : runs,
+        "tensorboard_command": f"tensorboard --logdir {LOGS_DIR}",
+    }
+
+
+@app.get("/training-metrics")
+def training_metrics_all():
+    """
+    Ringkasan metrik semua run (tanpa series lengkap).
+    Membaca event files via tensorboard_utils.
+    """
+    runs = tensorboard_utils.get_all_runs_summary()
+    if not runs:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tidak ada run ditemukan di folder logs: {LOGS_DIR}"
+        )
+    return {"status": "ok", "runs": runs}
+
+
+@app.get("/training-metrics/{run_name}")
+def training_metrics_run(run_name: str):
+    """
+    Metrik lengkap (termasuk series per step) untuk satu run tertentu.
+    Contoh: GET /training-metrics/20260511-075444
+    """
+    data = tensorboard_utils.get_run_metrics(run_name)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run '{run_name}' tidak ditemukan di {LOGS_DIR}"
+        )
+    return {"status": "ok", **data}
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     """
-    Prediksi total pengeluaran bulanan ke depan.
+    Prediksi amount_idr step berikutnya.
 
-    - **transactions**: list transaksi historis (minimal WINDOW bulan)
-    - **n_months_ahead**: berapa bulan ke depan yang ingin diprediksi (default 1)
+    - **rows**: list baris fitur sudah ternormalisasi (minimal WINDOW baris)
+    - **n_steps_ahead**: berapa langkah ke depan yang ingin diprediksi (default 1)
     """
-    df = pd.DataFrame([t.dict() for t in req.transactions])
-    df = df[df["transaction_type"] == "expense"]
-
-    if df.empty:
-        raise HTTPException(status_code=400, detail="Tidak ada data expense dalam transaksi yang dikirim")
-
-    feat = build_features(df)
-    if len(feat) < WINDOW:
+    if len(req.rows) < WINDOW:
         raise HTTPException(
             status_code=400,
-            detail=f"Data tidak cukup. Butuh minimal {WINDOW} bulan, tersedia {len(feat)} bulan."
+            detail=f"Butuh minimal {WINDOW} baris, tersedia {len(req.rows)}."
         )
 
-    X     = scaler_X.transform(feat[FEATURE_COLS].values)
-    X_win = X[-WINDOW:].copy()
+    X_raw = np.array([
+        [getattr(row, col, 0.0) for col in FEATURE_COLS]
+        for row in req.rows
+    ], dtype=np.float32)
+
+    X_win = X_raw[-WINDOW:].copy()
     preds = []
 
-    for step in range(req.n_months_ahead):
-        X_in = X_win[-WINDOW:].reshape(1, WINDOW, -1)
-        y_sc = float(model_loaded.predict(X_in, verbose=0)[0, 0])
-        y_rp = float(scaler_y.inverse_transform([[y_sc]])[0, 0])
+    for step in range(req.n_steps_ahead):
+        X_in   = X_win[-WINDOW:].reshape(1, WINDOW, N_FEATURES)
+        y_norm = float(model_loaded.predict(X_in, verbose=0)[0, 0])
+        y_idr  = float(scaler_y.inverse_transform([[y_norm]])[0, 0])
+
         preds.append(PredictionResult(
-            bulan_ke    =step + 1,
-            prediksi_rp =y_rp,
-            prediksi_fmt=f"Rp {y_rp:,.0f}"
+            step          =step + 1,
+            prediksi_norm =y_norm,
+            prediksi_idr  =y_idr,
+            prediksi_fmt  =f"Rp {y_idr:,.0f}"
         ))
-        # update sliding window dengan prediksi sebagai input berikutnya
-        new_row    = X_win[-1].copy()
-        new_row[0] = y_sc
-        X_win      = np.vstack([X_win[1:], new_row])
+
+        new_row = X_win[-1].copy()
+        if "amount_idr" in FEATURE_COLS:
+            new_row[FEATURE_COLS.index("amount_idr")] = y_norm
+        X_win = np.vstack([X_win[1:], new_row])
 
     return PredictResponse(
         status        ="success",
-        window_months =WINDOW,
+        window_size   =WINDOW,
         predictions   =preds,
         mae_normalized=model_config["test_mae_norm"]
     )
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 
 if __name__ == "__main__":
     import uvicorn

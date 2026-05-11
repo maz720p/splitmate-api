@@ -1,65 +1,97 @@
 """
-genai_api.py  ─  SplitMate Generative AI (Financial Insight) API
+genai_api.py  -  SplitMate Generative AI (Financial Insight) API
 =================================================================
-FastAPI service terpisah untuk rekomendasi keuangan berbasis Anthropic Claude.
-Service ini memanggil expense_api (/predict) lalu menghasilkan insight AI.
+FastAPI service untuk rekomendasi keuangan berbasis Gemini API
+Memanggil expense_api (/predict) lalu menghasilkan insight AI.
 
 Jalankan:
-  ANTHROPIC_API_KEY=sk-ant-... uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload
+  GEMINI_API_KEY=.... uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload
 
-Atau set di .env / environment variable sebelum menjalankan.
-
-Catatan: pastikan expense_api sudah berjalan di port 8000 (EXPENSE_API_URL).
+Pastikan expense_api sudah berjalan di port 8000 (atau set EXPENSE_API_URL).
 """
 
 import os
 import httpx
-import anthropic
-import pandas as pd
+import google.generativeai as genai
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# Config
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-EXPENSE_API_URL   = os.environ.get("EXPENSE_API_URL", "http://localhost:8000")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+EXPENSE_API_URL = os.environ.get("EXPENSE_API_URL", "http://localhost:8000")
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# App
 
 app = FastAPI(
     title="SplitMate GenAI Insight API",
-    description="REST API rekomendasi keuangan menggunakan Anthropic Claude",
+    description="REST API rekomendasi keuangan menggunakan Gemini API",
     version="1.0.0"
 )
 
 
-# ── Pydantic schemas ──────────────────────────────────────────────────────────
+# Pydantic schemas
 
-class TransactionItem(BaseModel):
-    year_month      : str   # format: "YYYY-MM"
-    amount          : float
-    category        : str
-    transaction_type: str = "expense"
-
-
-class InsightRequest(BaseModel):
-    transactions   : List[TransactionItem]
-    n_months_ahead : Optional[int] = 3
-    api_key        : Optional[str] = None   # override env var jika perlu
+class FeatureRow(BaseModel):
+    amount: float
+    month: float
+    is_weekend: int
+    year: float
+    transaction_type_income: int
+    category_freelance: int = 0
+    category_gaji: int = 0
+    category_hiburan: int = 0
+    category_investasi: int = 0
+    category_kesehatan: int = 0
+    category_lainnya: int = 0
+    category_makanan: int = 0
+    category_pendidikan: int = 0
+    category_tabungan: int = 0
+    category_tagihan: int = 0
+    category_tempat_tinggal: int = 0
+    category_transportasi: int = 0
+    payment_mode_ewallet: int = 0
+    payment_mode_kartu: int = 0
+    payment_mode_qris: int = 0
+    payment_mode_tunai: int = 0
+    location_bandung: int = 0
+    location_denpasar: int = 0
+    location_jakarta: int = 0
+    location_makassar: int = 0
+    location_medan: int = 0
+    location_palembang: int = 0
+    location_semarang: int = 0
+    location_surabaya: int = 0
+    location_unknown: int = 0
+    location_yogyakarta: int = 0
+    day_of_week_Monday: int = 0
+    day_of_week_Saturday: int = 0
+    day_of_week_Sunday: int = 0
+    day_of_week_Thursday: int = 0
+    day_of_week_Tuesday: int = 0
+    day_of_week_Wednesday: int = 0
 
 
 class PredictionResult(BaseModel):
-    bulan_ke    : int
-    prediksi_rp : float
+    step: int
+    prediksi_norm: float
+    prediksi_idr: float
     prediksi_fmt: str
 
 
+class InsightRequest(BaseModel):
+    rows          : List[FeatureRow]
+    n_steps_ahead : Optional[int] = 3
+    api_key       : Optional[str] = None
+
+
 class InsightSummary(BaseModel):
-    total_expense_rp : float
-    avg_monthly_rp   : float
-    top_category     : str
-    months_analyzed  : int
+    n_rows_input    : int
+    avg_amount      : float
+    pct_income_rows : float
+    top_category    : str
 
 
 class InsightResponse(BaseModel):
@@ -70,10 +102,9 @@ class InsightResponse(BaseModel):
 
 
 class RecommendRequest(BaseModel):
-    """Request langsung tanpa memanggil LSTM (pakai data & prediksi manual)."""
-    transactions   : List[TransactionItem]
-    predictions    : List[PredictionResult]
-    api_key        : Optional[str] = None
+    rows        : List[FeatureRow]
+    predictions : List[PredictionResult]
+    api_key     : Optional[str] = None
 
 
 class RecommendResponse(BaseModel):
@@ -81,86 +112,82 @@ class RecommendResponse(BaseModel):
     recommendation: str
 
 
-# ── Core AI function ──────────────────────────────────────────────────────────
+# Core AI function
 
-def _build_prompt(df_expense: pd.DataFrame, predictions: list) -> str:
-    """Menyusun prompt untuk Claude dari data expense + prediksi LSTM."""
-    monthly_summary = (
-        df_expense.groupby("year_month")["amount"]
-        .sum().reset_index()
-        .rename(columns={"amount": "total"})
-        .tail(6)
-    )
-    category_summary = (
-        df_expense.groupby("category")["amount"]
-        .sum()
-        .sort_values(ascending=False)
-        .head(5)
-    )
+def _build_prompt(rows: List[FeatureRow], predictions: List[PredictionResult]) -> str:
+    cat_cols = [
+        'category_freelance', 'category_gaji', 'category_hiburan',
+        'category_investasi', 'category_kesehatan', 'category_lainnya',
+        'category_makanan', 'category_pendidikan', 'category_tabungan',
+        'category_tagihan', 'category_tempat_tinggal', 'category_transportasi'
+    ]
+
+    cat_totals: Dict[str, int] = {c: 0 for c in cat_cols}
+    for row in rows:
+        for c in cat_cols:
+            cat_totals[c] += getattr(row, c, 0)
+
+    top_category = max(cat_totals, key=lambda k: cat_totals[k]).replace('category_', '')
+    avg_amount   = float(np.mean([r.amount for r in rows]))
+    pct_income   = float(np.mean([r.transaction_type_income for r in rows])) * 100
+
     pred_lines = [
-        f"  Bulan +{p['bulan_ke']}: {p['prediksi_fmt']}"
+        f"  Langkah +{p.step}: {p.prediksi_fmt} (normalized: {p.prediksi_norm:.4f})"
         for p in predictions
     ]
 
-    prompt = f"""Kamu adalah asisten keuangan cerdas untuk aplikasi SplitMate, \
+    return f"""Kamu adalah asisten keuangan cerdas untuk aplikasi SplitMate, \
 aplikasi manajemen patungan untuk Gen Z.
 
-Data pengeluaran pengguna 6 bulan terakhir:
-{monthly_summary.to_string(index=False)}
+Ringkasan data input pengguna:
+- Jumlah baris transaksi   : {len(rows)}
+- Rata-rata nilai amount   : {avg_amount:.4f} (normalized)
+- Proporsi transaksi income: {pct_income:.1f}%
+- Kategori terbanyak       : {top_category}
 
-5 kategori pengeluaran terbesar:
-{category_summary.to_string()}
-
-Prediksi pengeluaran dari model LSTM:
+Prediksi dari model LSTM:
 {chr(10).join(pred_lines)}
 
 Berdasarkan data di atas, berikan:
-1. Analisis singkat pola pengeluaran (2-3 kalimat)
-2. 3 rekomendasi konkret untuk menghemat pengeluaran bulan depan
-3. Satu tips khusus untuk kategori pengeluaran terbesar
+1. Analisis singkat pola transaksi (2-3 kalimat)
+2. 3 rekomendasi konkret untuk mengelola pengeluaran ke depan
+3. Tips khusus untuk kategori terbanyak: {top_category}
 
 Gunakan Bahasa Indonesia yang ramah dan relevan untuk Gen Z.
 Jawaban maksimal 250 kata."""
 
-    return prompt
-
 
 def get_financial_recommendation(
-    df_expense: pd.DataFrame,
-    predictions: list,
+    rows: List[FeatureRow],
+    predictions: List[PredictionResult],
     api_key: str = None
 ) -> str:
-    """
-    Kirim prompt ke Anthropic Claude dan kembalikan rekomendasi keuangan.
+    key = api_key or GEMINI_API_KEY
 
-    Args:
-        df_expense  : DataFrame dengan kolom year_month, amount, category
-        predictions : list dict dari /predict endpoint
-        api_key     : Anthropic API key (opsional, fallback ke env var)
-
-    Returns:
-        str: teks rekomendasi dalam Bahasa Indonesia
-    """
-    key = api_key or ANTHROPIC_API_KEY
     if not key:
         raise ValueError(
-            "ANTHROPIC_API_KEY belum diset. "
+            "GEMINI_API_KEY belum diset. "
             "Set environment variable atau kirim api_key dalam request."
         )
 
-    client = anthropic.Anthropic(api_key=key)
-    prompt = _build_prompt(df_expense, predictions)
+    genai.configure(api_key=key)
 
-    response = client.messages.create(
-        model     ="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        messages  =[{"role": "user", "content": prompt}]
+    model = genai.GenerativeModel("gemini-2.5-flash")
+
+    prompt = _build_prompt(rows, predictions)
+
+    response = model.generate_content(
+        prompt,
+        generation_config={
+            "temperature": 0.7,
+            "max_output_tokens": 512
+        }
     )
 
-    return response.content[0].text
+    return response.text
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# Endpoints
 
 @app.get("/")
 def root():
@@ -175,7 +202,7 @@ def root():
 def health():
     return {
         "status"         : "ok",
-        "anthropic_key"  : "set" if ANTHROPIC_API_KEY else "NOT SET – kirim api_key di request",
+        "gemini_key"     : "set" if GEMINI_API_KEY else "NOT SET",
         "expense_api_url": EXPENSE_API_URL
     }
 
@@ -183,57 +210,64 @@ def health():
 @app.post("/insight", response_model=InsightResponse)
 def insight(req: InsightRequest):
     """
-    Pipeline lengkap: kirim transaksi → prediksi LSTM → rekomendasi AI.
-
-    - Memanggil expense_api (/predict) untuk mendapatkan prediksi
-    - Kemudian menghasilkan rekomendasi keuangan via Claude
+    Pipeline lengkap: kirim baris fitur -> prediksi LSTM -> rekomendasi AI.
     """
-    # 1. Panggil expense_api /predict
     payload = {
-        "transactions"  : [t.dict() for t in req.transactions],
-        "n_months_ahead": req.n_months_ahead
+        "rows"          : [r.dict() for r in req.rows],
+        "n_steps_ahead" : req.n_steps_ahead
     }
+
     try:
         with httpx.Client(timeout=30) as client:
             r = client.post(f"{EXPENSE_API_URL}/predict", json=payload)
             r.raise_for_status()
             pred_data = r.json()
+
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Expense API error: {e.response.text}")
+
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Expense API tidak dapat dijangkau: {str(e)}")
 
-    predictions = pred_data["predictions"]
+    predictions = [PredictionResult(**p) for p in pred_data["predictions"]]
 
-    # 2. Buat summary data
-    df_expense = pd.DataFrame([t.dict() for t in req.transactions])
-    df_expense = df_expense[df_expense["transaction_type"] == "expense"]
+    cat_cols = [
+        'category_freelance', 'category_gaji', 'category_hiburan',
+        'category_investasi', 'category_kesehatan', 'category_lainnya',
+        'category_makanan', 'category_pendidikan', 'category_tabungan',
+        'category_tagihan', 'category_tempat_tinggal', 'category_transportasi'
+    ]
 
-    if df_expense.empty:
-        raise HTTPException(status_code=400, detail="Tidak ada data expense")
+    cat_totals = {c: sum(getattr(r, c, 0) for r in req.rows) for c in cat_cols}
 
-    total_expense = float(df_expense["amount"].sum())
-    avg_monthly   = float(df_expense.groupby("year_month")["amount"].sum().mean())
-    top_category  = df_expense.groupby("category")["amount"].sum().idxmax()
-    months_count  = df_expense["year_month"].nunique()
+    top_cat = max(cat_totals, key=lambda k: cat_totals[k]).replace('category_', '')
 
-    # 3. Generate rekomendasi AI
+    avg_amount = float(np.mean([r.amount for r in req.rows]))
+
+    pct_income = float(np.mean([r.transaction_type_income for r in req.rows])) * 100
+
     try:
-        recommendation = get_financial_recommendation(df_expense, predictions, req.api_key)
+        recommendation = get_financial_recommendation(
+            req.rows,
+            predictions,
+            req.api_key
+        )
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except anthropic.AuthenticationError:
-        raise HTTPException(status_code=401, detail="Anthropic API key tidak valid")
+
+    except Exception:
+        raise HTTPException(status_code=401, detail="Gemini API key tidak valid")
 
     return InsightResponse(
-        status      ="success",
-        predictions =[PredictionResult(**p) for p in predictions],
+        status        ="success",
+        predictions   =predictions,
         recommendation=recommendation,
-        summary     =InsightSummary(
-            total_expense_rp=total_expense,
-            avg_monthly_rp  =avg_monthly,
-            top_category    =top_category,
-            months_analyzed =months_count
+        summary       =InsightSummary(
+            n_rows_input   =len(req.rows),
+            avg_amount     =avg_amount,
+            pct_income_rows=pct_income,
+            top_category   =top_cat
         )
     )
 
@@ -241,31 +275,30 @@ def insight(req: InsightRequest):
 @app.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest):
     """
-    Hanya generate rekomendasi AI dari data & prediksi yang sudah ada.
-    Gunakan ini jika prediksi sudah didapat dari expense_api secara terpisah.
+    Hanya generate rekomendasi AI dari data dan prediksi yang sudah ada.
     """
-    df_expense = pd.DataFrame([t.dict() for t in req.transactions])
-    df_expense = df_expense[df_expense["transaction_type"] == "expense"]
-
-    if df_expense.empty:
-        raise HTTPException(status_code=400, detail="Tidak ada data expense")
-
     try:
         recommendation = get_financial_recommendation(
-            df_expense,
-            [p.dict() for p in req.predictions],
+            req.rows,
+            req.predictions,
             req.api_key
         )
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except anthropic.AuthenticationError:
-        raise HTTPException(status_code=401, detail="Anthropic API key tidak valid")
 
-    return RecommendResponse(status="success", recommendation=recommendation)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Gemini API key tidak valid")
+
+    return RecommendResponse(
+        status="success",
+        recommendation=recommendation
+    )
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)
