@@ -1,0 +1,30 @@
+# Virtual Environment
+venv/
+Lib/
+Scripts/
+Include/
+pyvenv.cfg
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# TensorBoard Logs
+logs/
+runs/
+events.out.tfevents.*
+
+# Node.js
+node_modules/
+
+# Environment Files
+.env
+
+# VSCode
+.vscode/
+
+# OS Files
+.DS_Store
+Thumbs.db
