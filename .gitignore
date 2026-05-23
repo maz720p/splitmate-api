@@ -11,11 +11,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# TensorBoard Logs
-logs/
-runs/
-events.out.tfevents.*
-
 # Node.js
 node_modules/
 
