@@ -19,11 +19,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Set API key jika belum ada
-if "%ANTHROPIC_API_KEY%"=="" (
+:: Set Gemini API key jika belum ada
+if "%GEMINI_API_KEY%"=="" (
     echo.
-    echo ANTHROPIC_API_KEY belum diset.
-    set /p ANTHROPIC_API_KEY="Masukkan Anthropic API Key kamu: "
+    echo GEMINI_API_KEY belum diset.
+    set /p GEMINI_API_KEY="Masukkan Gemini API Key kamu: "
 )
 
 :: Jalankan Expense Prediction API
@@ -35,11 +35,13 @@ timeout /t 3 /nobreak >nul
 
 :: Jalankan GenAI Insight API
 echo [3/3] Menjalankan GenAI Insight API di port 8001...
-start "GenAI API" cmd /k "set ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY% && uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload"
+start "GenAI API" cmd /k "set GEMINI_API_KEY=%GEMINI_API_KEY% && uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload"
 
 echo.
 echo Kedua API sudah berjalan!
 echo Expense API : http://localhost:8000/docs
 echo GenAI API   : http://localhost:8001/docs
 echo.
+echo TensorBoard : tensorboard --logdir logs/
+echo ----------------------------------
 pause

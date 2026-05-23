@@ -18,12 +18,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Set API key jika belum ada
-if [ -z "$ANTHROPIC_API_KEY" ]; then
+# Set Gemini API key jika belum ada
+if [ -z "$GEMINI_API_KEY" ]; then
     echo ""
-    echo "ANTHROPIC_API_KEY belum diset."
-    read -p "Masukkan Anthropic API Key kamu: " ANTHROPIC_API_KEY
-    export ANTHROPIC_API_KEY
+    echo "GEMINI_API_KEY belum diset."
+    read -p "Masukkan Gemini API Key kamu: " GEMINI_API_KEY
+    export GEMINI_API_KEY
 fi
 
 # Jalankan Expense Prediction API
@@ -36,7 +36,7 @@ sleep 2
 
 # Jalankan GenAI Insight API
 echo "[3/3] Menjalankan GenAI Insight API di port 8001..."
-uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload &
+GEMINI_API_KEY=$GEMINI_API_KEY uvicorn genai_api:app --host 0.0.0.0 --port 8001 --reload &
 PID2=$!
 
 echo ""
@@ -44,9 +44,9 @@ echo "Kedua API sudah berjalan!"
 echo "Expense API : http://localhost:8000/docs"
 echo "GenAI API   : http://localhost:8001/docs"
 echo ""
-echo "Tekan Ctrl+C untuk stop semua."
+echo "TensorBoard : tensorboard --logdir logs/"
 echo "----------------------------------"
+echo "Tekan Ctrl+C untuk stop semua."
 
-# Tunggu sampai di-stop
 trap "kill $PID1 $PID2 2>/dev/null; exit 0" INT TERM
 wait $PID1 $PID2

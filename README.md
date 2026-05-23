@@ -17,14 +17,18 @@ splitmate/
 │   ├── expense_predictor.keras
 │   ├── scalers.pkl
 │   └── model_config.json
-└── logs/                         <-- TensorBoard training logs
-    ├── 20260511-075444/
-    │   ├── train/
-    │   └── validation/
-    └── gradient_tape_20260511-075701/
+└── logs/                         <-- TensorBoard training logs (rename dari tb_logs/ setelah export)
+    └── 20260520-221031/
         ├── train/
-        └── validation/
+        ├── validation/
+        ├── gt_train/             <-- dari GradientTape loop
+        └── gt_val/               <-- dari GradientTape loop
 ```
+
+> **Catatan:** Notebook menyimpan log ke `tb_logs/` secara default. Setelah download
+> `tensorboard_logs.zip`, extract dan rename folder `tb_logs/` menjadi `logs/`
+> (sesuai default `LOGS_DIR` di `expense_api.py` dan `tensorboard_utils.py`),
+> atau set env var `LOGS_DIR=tb_logs` saat menjalankan service.
 
 ---
 
@@ -50,14 +54,14 @@ Setelah berjalan, buka browser ke:
 
 ## TensorBoard
 
-Folder `logs/` berisi training logs dari dua sesi training model LSTM:
+Folder `logs/` berisi training logs dari sesi training model BiLSTM + Attention v4:
 
 | Run | Keterangan |
 |---|---|
-| `20260511-075444` | Sesi training utama (Keras fit callback) |
+| `20260520-221031` | Sesi training utama (Keras `model.fit` callback) |
 | `gradient_tape_20260511-075701` | Sesi training dengan custom `GradientTape` loop |
 
-Masing-masing run memiliki dua split: `train` dan `validation`.
+Run `20260520-221031` memiliki 4 split: `train`, `validation`, `gt_train`, `gt_val`.
 
 ### Membuka TensorBoard (visual)
 
@@ -69,7 +73,7 @@ Lalu buka http://localhost:6006
 
 ### Membaca metrik via API
 
-`tensorboard_utils.py` membaca isi event files secara programatik dan dipakai oleh dua endpoint berikut:
+`tensorboard_utils.py` membaca isi event files secara programatik dan dipakai oleh endpoint berikut:
 
 | Endpoint | Keterangan |
 |---|---|
@@ -77,13 +81,13 @@ Lalu buka http://localhost:6006
 | `GET /training-metrics` | Ringkasan metrik semua run (tanpa series) |
 | `GET /training-metrics/{run_name}` | Metrik lengkap + series per step untuk satu run |
 
-Contoh response `GET /training-metrics/20260511-075444`:
+Contoh response `GET /training-metrics/20260520-221031`:
 
 ```json
 {
   "status": "ok",
-  "run_name": "20260511-075444",
-  "splits": ["train", "validation"],
+  "run_name": "20260520-221031",
+  "splits": ["train", "validation", "gt_train", "gt_val"],
   "summary": {
     "train": {
       "loss": { "n_steps": 50, "first": 0.12, "last": 0.004, "min": 0.004, "max": 0.12 }
@@ -112,7 +116,7 @@ runs = tensorboard_utils.list_runs()
 summary = tensorboard_utils.get_all_runs_summary()
 
 # Metrik lengkap satu run
-metrics = tensorboard_utils.get_run_metrics("20260511-075444")
+metrics = tensorboard_utils.get_run_metrics("20260520-221031")
 ```
 
 ### Mengganti lokasi folder logs
@@ -121,17 +125,20 @@ Set environment variable `LOGS_DIR` (berlaku untuk `expense_api.py` dan `tensorb
 
 ```bash
 LOGS_DIR=/path/lain uvicorn expense_api:app --port 8000 --reload
+
+# Contoh jika logs masih di tb_logs/ (belum di-rename):
+LOGS_DIR=tb_logs uvicorn expense_api:app --port 8000 --reload
 ```
 
 ---
 
 ## 1. expense_api.py
 
-FastAPI untuk prediksi pengeluaran menggunakan model LSTM BiLSTM + Attention. Berjalan di port 8000.
+FastAPI untuk prediksi pengeluaran menggunakan model BiLSTM + Attention v4. Berjalan di port 8000.
 
 Endpoints:
 - `GET /health` - status model dan ketersediaan logs
-- `GET /model-info` - metrik model (MAE, akurasi, window size)
+- `GET /model-info` - metrik model (MAE, akurasi, window size, feature list)
 - `GET /training-logs` - daftar TensorBoard log runs
 - `GET /training-metrics` - ringkasan metrik semua run via `tensorboard_utils`
 - `GET /training-metrics/{run_name}` - metrik lengkap satu run
@@ -146,14 +153,11 @@ Content-Type: application/json
 {
   "rows": [
     {
-      "amount": -0.05,
-      "month": -1.59,
+      "amount_idr": 250000,
+      "month": 5,
       "is_weekend": 0,
-      "year": -1.36,
-      "transaction_type_income": 0,
+      "year": 2026,
       "category_makanan": 1,
-      "payment_mode_ewallet": 1,
-      "location_jakarta": 1,
       "day_of_week_Monday": 1
     }
   ],
@@ -167,10 +171,13 @@ Contoh response:
 {
   "status": "success",
   "window_size": 10,
+  "n_features": 21,
   "predictions": [
     { "step": 1, "prediksi_norm": 0.032, "prediksi_idr": 850000.0, "prediksi_fmt": "Rp 850,000" }
   ],
-  "mae_normalized": 0.006
+  "mae_normalized": 0.0158,
+  "accuracy_pct": 97.9,
+  "inference_note": "Input: X_raw (IDR mentah) -> scaler_X.transform(X_raw). Output: scaler_y.inverse_transform(y_pred) -> np.expm1 -> IDR"
 }
 ```
 
@@ -192,7 +199,16 @@ POST http://localhost:8001/insight
 Content-Type: application/json
 
 {
-  "rows": [ ... ],
+  "rows": [
+    {
+      "amount_idr": 250000,
+      "month": 5,
+      "is_weekend": 0,
+      "year": 2026,
+      "category_makanan": 1,
+      "day_of_week_Monday": 1
+    }
+  ],
   "n_steps_ahead": 3,
   "api_key": "AIza..."
 }
@@ -212,19 +228,38 @@ Utility module untuk membaca TensorBoard event files secara programatik. Dipakai
 
 ---
 
-## Daftar Field FeatureRow
+## Daftar Field FeatureRow (Model v4 — 21 Fitur)
+
+> **Penting:** Model v4 **tidak** menggunakan `payment_mode`, `location`,
+> `transaction_type_income`, `category_freelance`, atau `category_gaji`.
+> `amount_idr` dikirim dalam **IDR mentah** (bukan dibagi juta), normalisasi
+> dilakukan otomatis oleh `scaler_X` di backend.
 
 | Field | Tipe | Keterangan |
 |---|---|---|
-| `amount` | float | Jumlah transaksi (normalized) |
-| `month` | float | Bulan (normalized) |
+| `amount_idr` | float | Jumlah transaksi dalam IDR mentah (misal: `250000`) |
+| `month` | float | Bulan 1–12 |
 | `is_weekend` | int | 1 jika weekend, 0 jika tidak |
-| `year` | float | Tahun (normalized) |
-| `transaction_type_income` | int | 1 jika income, 0 jika expense |
-| `category_*` | int | One-hot: freelance, gaji, hiburan, investasi, kesehatan, lainnya, makanan, pendidikan, tabungan, tagihan, tempat_tinggal, transportasi |
-| `payment_mode_*` | int | One-hot: ewallet, kartu, qris, tunai |
-| `location_*` | int | One-hot: bandung, denpasar, jakarta, makassar, medan, palembang, semarang, surabaya, unknown, yogyakarta |
-| `day_of_week_*` | int | One-hot: Monday, Tuesday, Wednesday, Thursday, Saturday, Sunday |
+| `year` | float | Tahun (2022–2026) |
+| `category_makanan` | int | One-hot kategori |
+| `category_tempat_tinggal` | int | One-hot kategori |
+| `category_transportasi` | int | One-hot kategori |
+| `category_tagihan` | int | One-hot kategori |
+| `category_hiburan` | int | One-hot kategori |
+| `category_kesehatan` | int | One-hot kategori |
+| `category_pendidikan` | int | One-hot kategori |
+| `category_tabungan` | int | One-hot kategori |
+| `category_lainnya` | int | One-hot kategori |
+| `category_investasi` | int | One-hot kategori |
+| `day_of_week_Friday` | int | One-hot hari (semua 7 hari eksplisit, tidak ada reference category) |
+| `day_of_week_Monday` | int | One-hot hari |
+| `day_of_week_Saturday` | int | One-hot hari |
+| `day_of_week_Sunday` | int | One-hot hari |
+| `day_of_week_Thursday` | int | One-hot hari |
+| `day_of_week_Tuesday` | int | One-hot hari |
+| `day_of_week_Wednesday` | int | One-hot hari |
+
+Field yang tidak disebutkan dalam request akan default ke 0.
 
 ---
 
@@ -241,8 +276,8 @@ Utility module untuk membaca TensorBoard event files secara programatik. Dipakai
 
 ## Catatan
 
-- Semua nilai fitur harus sudah ternormalisasi sesuai scaler dari pipeline Data Science
-- Minimal baris input = `window_size` (lihat `model_config.json`)
-- Field yang tidak disebutkan dalam request akan default ke 0
-- `api_key` di body request bersifat opsional jika `GEMINI_API_KEY` sudah diset sebagai environment variable
+- `amount_idr` dikirim dalam IDR mentah — normalisasi dilakukan otomatis oleh backend via `scaler_X`
+- Minimal baris input = `window_size` (10, lihat `model_config.json`) — jika kurang, zero-padding otomatis ditambahkan di depan
+- `api_key` di body request `/insight` bersifat opsional jika `GEMINI_API_KEY` sudah diset sebagai environment variable
 - TensorBoard logs tersimpan di folder `logs/` — bisa dibuka visual via `tensorboard --logdir logs/` atau via API endpoint `/training-metrics`
+- Model v4 MAE normalized: **0.0158**, Accuracy (NAE ≤ 0.05): **97.9%**

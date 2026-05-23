@@ -1,32 +1,32 @@
 """
 tensorboard_utils.py  -  SplitMate TensorBoard Log Reader
-===========================================================
-Utility untuk membaca dan menyajikan metrik training dari TensorBoard event files.
+==========================================================
+Utility untuk membaca metrik training dari TensorBoard event files.
 Digunakan oleh expense_api.py untuk endpoint /training-metrics.
 
-Struktur log yang didukung:
-  tensorboard_logs/
-    <run_name>/
-      train/   events.out.tfevents.*
-      validation/ events.out.tfevents.*
+Mendukung 4 split dari training v4:
+  train / validation       -> dari model.fit (Functional API)
+  gt_train / gt_val        -> dari tf.GradientTape (Subclassing)
 """
 
 import os
 from typing import Dict, List, Optional, Any
 import tensorflow as tf
 
-
 LOG_DIR = os.environ.get("LOGS_DIR", "logs")
+
+# Semua split yang mungkin ada di log v4
+ALL_SPLITS = ["train", "validation", "gt_train", "gt_val"]
 
 
 def _parse_run(run_path: str) -> Dict[str, Dict[str, List[Dict]]]:
     """
     Baca semua event files dalam satu run directory.
-    Mengembalikan dict {split: {tag: [{step, value}]}}
+    Return: {split: {tag: [{step, value}]}}
     """
     result: Dict[str, Dict[str, List[Dict]]] = {}
 
-    for split in ["train", "validation"]:
+    for split in ALL_SPLITS:
         split_path = os.path.join(run_path, split)
         if not os.path.isdir(split_path):
             continue
@@ -41,7 +41,6 @@ def _parse_run(run_path: str) -> Dict[str, Dict[str, List[Dict]]]:
                     step = int(event.step)
                     for v in event.summary.value:
                         tag = v.tag
-                        # Skip histogram / non-scalar tags
                         if "histogram" in tag or tag == "keras":
                             continue
                         try:
@@ -54,7 +53,6 @@ def _parse_run(run_path: str) -> Dict[str, Dict[str, List[Dict]]]:
             except Exception:
                 continue
 
-        # Sort tiap tag by step
         for tag in result[split]:
             result[split][tag].sort(key=lambda x: x["step"])
 
@@ -82,7 +80,6 @@ def get_run_metrics(run_name: str) -> Optional[Dict[str, Any]]:
 
     data = _parse_run(run_path)
 
-    # Hitung ringkasan per split per tag
     summary: Dict[str, Dict[str, Dict]] = {}
     for split, tags in data.items():
         summary[split] = {}
@@ -90,11 +87,11 @@ def get_run_metrics(run_name: str) -> Optional[Dict[str, Any]]:
             values = [v["value"] for v in vals]
             if values:
                 summary[split][tag] = {
-                    "n_steps"  : len(values),
-                    "first"    : round(values[0], 8),
-                    "last"     : round(values[-1], 8),
-                    "min"      : round(min(values), 8),
-                    "max"      : round(max(values), 8),
+                    "n_steps": len(values),
+                    "first"  : round(values[0],  8),
+                    "last"   : round(values[-1],  8),
+                    "min"    : round(min(values),  8),
+                    "max"    : round(max(values),  8),
                 }
 
     return {
@@ -106,9 +103,7 @@ def get_run_metrics(run_name: str) -> Optional[Dict[str, Any]]:
 
 
 def get_all_runs_summary() -> List[Dict[str, Any]]:
-    """
-    Ringkasan semua run — tanpa series lengkap (lebih ringan).
-    """
+    """Ringkasan semua run tanpa series lengkap."""
     runs = []
     for run_name in list_runs():
         metrics = get_run_metrics(run_name)
